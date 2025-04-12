@@ -1,0 +1,29 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Environment variables
+# .env  # Uncomment if you don't want to track .env file
+
+# Logs
+*.log
+
+# Generated images
+# *.png  # Uncomment if you don't want to track performance charts
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+print("--- SCRIPT START ---") # Debug print
 # ====================================================================
 # WIF TRADER BOT - Gelişmiş Bitcoin ve WIF Coin Alım-Satım Botu
 # ====================================================================
@@ -114,10 +115,30 @@ class WIFTraderBot:
         self.position_sizing = True  # Pozisyon boyutlandırma aktif
         self.max_position_size = 0.8  # Maksimum pozisyon büyüklüğü (total balance'ın %80'i)
         
+        # Yeni gelişmiş parametre ve stratejiler
+        self.fibonacci_enabled = True  # Fibonacci retracement seviyelerini kullan
+        self.ichimoku_enabled = True  # Ichimoku bulut göstergesini kullan
+        self.volume_analysis = True  # Hacim analizi
+        self.divergence_analysis = True  # RSI/Fiyat uyumsuzluğu tespiti
+        self.adaptive_parameters = True  # Volatiliteye bağlı parametreleri ayarla
+        self.ml_prediction = False  # Makine öğrenmesi tahmin modelini kullan (varsayılan: kapalı, veri az olduğunda sorun çıkarabilir)
+        
+        # Fibonacci seviyeleri
+        self.fib_levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1]
+        
+        # Portföy optimizasyonu
+        self.risk_per_trade = 0.02  # Her işlemde risk alınan miktar (toplam portföyün %2'si)
+        self.max_open_positions = 3  # Maksimum açık pozisyon sayısı
+        self.current_positions = 0  # Mevcut açık pozisyon sayısı
+        
+        # Volatilite analizi
+        self.atr_period = 14  # Average True Range periyodu
+        self.vix_threshold = 0.03  # Yüksek volatilite eşiği
+        
         # Email notification settings
-        self.email_notifications = True
+        self.email_notifications = True  # E-posta bildirimleri tekrar etkinleştirildi
         self.notification_email = "yustun355@gmail.com"
-        self.email_interval_hours = 1
+        self.email_interval_hours = 1/60  # 1 saat yerine 1 dakika (1/60 saat)
         self.last_email_time = None
         
     def fetch_balance(self):
@@ -191,15 +212,23 @@ class WIFTraderBot:
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                     df.set_index('timestamp', inplace=True)
-                
+                    
                     logger.info(f"Market data fetched successfully from {fallback_exchange}: {len(df)} candles")
                     self.price_data = df
                     return df
-                
-                # If fallback exchange is not available or we're already using it, try CoinGecko
-                logger.info("Trying CoinGecko API")
+                else:
+                     # If already using fallback or fallback failed, try CoinGecko next
+                     pass # Continue to CoinGecko attempt below
+
+            except Exception as fallback_error:
+                logger.error(f"Error fetching from fallback exchange {fallback_exchange}: {fallback_error}")
+                # Fallback exchange failed, continue to CoinGecko attempt
+
+            # If fallback exchange is not available or we're already using it, try CoinGecko
+            logger.info("Trying CoinGecko API")
+            try: # Add try block for CoinGecko
                 url = "https://api.coingecko.com/api/v3/coins/dogwifhat/market_chart"
-                
+
                 # Convert timeframe to days for CoinGecko
                 days = 30
                 if self.timeframe == '5m':
@@ -245,14 +274,14 @@ class WIFTraderBot:
                 self.price_data = df
                 return df
             except Exception as data_error:
-                logger.error(f"Error fetching data from alternative sources: {data_error}")
+                logger.error(f"Error fetching data from alternative sources (CoinGecko): {data_error}")
                 # All attempts failed, generate synthetic data as last resort
                 logger.warning("All data sources failed. Using synthetic data as last resort.")
                 self.generate_synthetic_data(limit)
                 return self.price_data
-            
+
         except Exception as e:
-            logger.error(f"Error fetching market data from all sources: {e}")
+            logger.error(f"Error fetching market data from primary source and failed to recover: {e}")
             logger.warning("Falling back to synthetic data generation")
             self.generate_synthetic_data(limit)
             return self.price_data
@@ -267,9 +296,10 @@ class WIFTraderBot:
         # Try to get current price, or use a reasonable estimate
         try:
             current_price = self.get_current_wif_price()
-        except:
-            current_price = None
-            
+        except Exception as coingecko_err:
+            logger.warning(f"Could not get current price from CoinGecko: {coingecko_err}")
+            return None # Return None if CoinGecko also fails
+        
         latest_price = current_price or 0.47  # Reasonable WIF price if current price is unavailable
         
         # Generate random seed based on current time
@@ -315,19 +345,9 @@ class WIFTraderBot:
             # First try using the exchange
             ticker = self.exchange.fetch_ticker(self.symbol)
             return ticker['last']
-        except:
-            # Fallback to CoinGecko
-            try:
-                url = "https://api.coingecko.com/api/v3/simple/price"
-                params = {
-                    'ids': 'dogwifhat',
-                    'vs_currencies': 'usd'
-                }
-                response = requests.get(url, params=params)
-                data = response.json()
-                return data['dogwifhat']['usd']
-            except:
-                return None
+        except Exception as coingecko_err:
+            logger.warning(f"Could not get current price from CoinGecko: {coingecko_err}")
+            return None # Return None if CoinGecko also fails
             
     def calculate_indicators(self):
         """Calculate technical indicators for trading decisions"""
@@ -354,6 +374,72 @@ class WIFTraderBot:
         df['macd'] = df['ema_short'] - df['ema_long']
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         
+        # Bollinger Bands
+        df['sma_20'] = df['close'].rolling(window=20).mean()
+        df['bollinger_std'] = df['close'].rolling(window=20).std()
+        df['bollinger_upper'] = df['sma_20'] + (df['bollinger_std'] * 2)
+        df['bollinger_lower'] = df['sma_20'] - (df['bollinger_std'] * 2)
+        
+        # Average True Range (ATR) - volatilite göstergesi
+        tr1 = abs(df['high'] - df['low'])
+        tr2 = abs(df['high'] - df['close'].shift())
+        tr3 = abs(df['low'] - df['close'].shift())
+        tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+        df['atr'] = tr.rolling(window=self.atr_period).mean()
+        
+        # Stochastic RSI
+        stoch_k = 100 * ((df['rsi'] - df['rsi'].rolling(14).min()) / 
+                         (df['rsi'].rolling(14).max() - df['rsi'].rolling(14).min()))
+        df['stoch_rsi'] = stoch_k.rolling(3).mean()  # 3-period smoothing
+        
+        # Money Flow Index (MFI)
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        money_flow = typical_price * df['volume']
+        positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(window=14).sum()
+        negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(window=14).sum()
+        mf_ratio = positive_flow / negative_flow
+        df['mfi'] = 100 - (100 / (1 + mf_ratio))
+        
+        # Fibonacci Retracement seviyeleri (son 20 bar için)
+        if self.fibonacci_enabled and len(df) >= 20:
+            rolling_high = df['high'].rolling(window=20).max()
+            rolling_low = df['low'].rolling(window=20).min()
+            price_range = rolling_high - rolling_low
+            
+            for level in self.fib_levels:
+                df[f'fib_{int(level*1000)}'] = rolling_high - (price_range * level)
+        
+        # Ichimoku Bulut hesaplama
+        if self.ichimoku_enabled:
+            # Tenkan-sen (Conversion Line): 9-period high + 9-period low / 2
+            df['tenkan_sen'] = (df['high'].rolling(window=9).max() + 
+                               df['low'].rolling(window=9).min()) / 2
+            
+            # Kijun-sen (Base Line): 26-period high + 26-period low / 2
+            df['kijun_sen'] = (df['high'].rolling(window=26).max() + 
+                              df['low'].rolling(window=26).min()) / 2
+                              
+            # Senkou Span A (Leading Span A): (Conversion Line + Base Line) / 2
+            df['senkou_span_a'] = ((df['tenkan_sen'] + df['kijun_sen']) / 2).shift(26)
+            
+            # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+            df['senkou_span_b'] = ((df['high'].rolling(window=52).max() + 
+                                  df['low'].rolling(window=52).min()) / 2).shift(26)
+                                  
+            # Chikou Span (Lagging Span): Close price shifted back 26 periods
+            df['chikou_span'] = df['close'].shift(-26)
+        
+        # ML prediction için son fiyat değişimleri (basit bir gösterge)
+        df['price_change'] = df['close'].pct_change()
+        df['price_change_1'] = df['price_change'].shift(1)
+        df['price_change_2'] = df['price_change'].shift(2)
+        df['price_change_3'] = df['price_change'].shift(3)
+        
+        # Hacim bazlı Trend Analizi - On Balance Volume (OBV)
+        df['obv_change'] = np.where(df['close'] > df['close'].shift(1), df['volume'],
+                          np.where(df['close'] < df['close'].shift(1), -df['volume'], 0))
+        df['obv'] = df['obv_change'].cumsum()
+        
         self.price_data = df
         logger.info("Technical indicators calculated successfully")
         return True
@@ -364,60 +450,239 @@ class WIFTraderBot:
             logger.warning("Indicators not calculated, cannot generate signals")
             return None
             
-        df = self.price_data.iloc[-1]  # Get the latest data point
-        current_price = df['close']
-        rsi = df['rsi']
-        ema_short = df['ema_short']
-        ema_long = df['ema_long']
-        macd = df['macd']
-        macd_signal = df['macd_signal']
+        df = self.price_data.copy()
+        latest = df.iloc[-1]  # Get the latest data point
+        prev = df.iloc[-2] if len(df) > 1 else None
         
-        # Define signals
+        current_price = latest['close']
+        rsi = latest['rsi']
+        ema_short = latest['ema_short']
+        ema_long = latest['ema_long']
+        macd = latest['macd']
+        macd_signal = latest['macd_signal']
+        
+        # Define signals with weights
         buy_signals = []
         sell_signals = []
+        signal_weights = {
+            'buy': 0,
+            'sell': 0
+        }
         
         # RSI signals
         if rsi < self.rsi_oversold:
-            buy_signals.append(f"RSI oversold ({rsi:.2f})")
+            signal = f"RSI oversold ({rsi:.2f})"
+            buy_signals.append(signal)
+            signal_weights['buy'] += 2  # RSI oversold is a strong buy signal
         if rsi > self.rsi_overbought:
-            sell_signals.append(f"RSI overbought ({rsi:.2f})")
+            signal = f"RSI overbought ({rsi:.2f})"
+            sell_signals.append(signal)
+            signal_weights['sell'] += 2  # RSI overbought is a strong sell signal
             
         # EMA crossover signals
-        if ema_short > ema_long:
-            buy_signals.append("EMA bullish crossover")
-        if ema_short < ema_long:
-            sell_signals.append("EMA bearish crossover")
+        if ema_short > ema_long and (prev is None or prev['ema_short'] <= prev['ema_long']):
+            signal = "EMA bullish crossover"
+            buy_signals.append(signal)
+            signal_weights['buy'] += 3  # Fresh crossover is high weight
+        elif ema_short > ema_long:
+            signal = "EMA bullish trend"
+            buy_signals.append(signal)
+            signal_weights['buy'] += 1  # Continuing trend is lower weight
+            
+        if ema_short < ema_long and (prev is None or prev['ema_short'] >= prev['ema_long']):
+            signal = "EMA bearish crossover"
+            sell_signals.append(signal)
+            signal_weights['sell'] += 3  # Fresh crossover is high weight
+        elif ema_short < ema_long:
+            signal = "EMA bearish trend"
+            sell_signals.append(signal)
+            signal_weights['sell'] += 1  # Continuing trend is lower weight
             
         # MACD signals
-        if macd > macd_signal:
-            buy_signals.append("MACD bullish")
-        if macd < macd_signal:
-            sell_signals.append("MACD bearish")
+        if macd > macd_signal and (prev is None or prev['macd'] <= prev['macd_signal']):
+            signal = "MACD bullish crossover"
+            buy_signals.append(signal)
+            signal_weights['buy'] += 2
+        elif macd > macd_signal:
+            signal = "MACD bullish"
+            buy_signals.append(signal)
+            signal_weights['buy'] += 1
             
+        if macd < macd_signal and (prev is None or prev['macd'] >= prev['macd_signal']):
+            signal = "MACD bearish crossover"
+            sell_signals.append(signal)
+            signal_weights['sell'] += 2
+        elif macd < macd_signal:
+            signal = "MACD bearish"
+            sell_signals.append(signal)
+            signal_weights['sell'] += 1
+        
+        # Bollinger Bands sinyalleri
+        if 'bollinger_upper' in latest and 'bollinger_lower' in latest:
+            if current_price > latest['bollinger_upper']:
+                signal = "Price above upper Bollinger Band"
+                sell_signals.append(signal)
+                signal_weights['sell'] += 1.5
+            if current_price < latest['bollinger_lower']:
+                signal = "Price below lower Bollinger Band"
+                buy_signals.append(signal)
+                signal_weights['buy'] += 1.5
+                
+        # MFI (Money Flow Index) sinyalleri
+        if 'mfi' in latest:
+            if latest['mfi'] < 20:
+                signal = f"MFI oversold ({latest['mfi']:.2f})"
+                buy_signals.append(signal)
+                signal_weights['buy'] += 1.5
+            if latest['mfi'] > 80:
+                signal = f"MFI overbought ({latest['mfi']:.2f})"
+                sell_signals.append(signal)
+                signal_weights['sell'] += 1.5
+        
+        # Fibonacci Retracement sinyalleri
+        if self.fibonacci_enabled:
+            for level in [0.236, 0.382, 0.618]:
+                fib_key = f'fib_{int(level*1000)}'
+                if fib_key in latest:
+                    fib_level = latest[fib_key]
+                    # Fiyat fibonacci seviyesinin altına düştüyse ve yükseliyorsa - alım sinyali
+                    if current_price < fib_level and current_price > prev['close']:
+                        signal = f"Price crossed up through Fibonacci {level}"
+                        buy_signals.append(signal)
+                        signal_weights['buy'] += 1
+                    # Fiyat fibonacci seviyesinin üstüne çıktıysa ve düşüyorsa - satım sinyali
+                    elif current_price > fib_level and current_price < prev['close']:
+                        signal = f"Price crossed down through Fibonacci {level}"
+                        sell_signals.append(signal)
+                        signal_weights['sell'] += 1
+        
+        # Ichimoku Bulut sinyalleri
+        if self.ichimoku_enabled and 'tenkan_sen' in latest and 'kijun_sen' in latest:
+            # Tenkan-sen ve Kijun-sen çaprazlamaları
+            if latest['tenkan_sen'] > latest['kijun_sen'] and prev['tenkan_sen'] <= prev['kijun_sen']:
+                signal = "Ichimoku bullish TK cross"
+                buy_signals.append(signal)
+                signal_weights['buy'] += 2
+            if latest['tenkan_sen'] < latest['kijun_sen'] and prev['tenkan_sen'] >= prev['kijun_sen']:
+                signal = "Ichimoku bearish TK cross"
+                sell_signals.append(signal)
+                signal_weights['sell'] += 2
+                
+            # Fiyat bulutun üzerinde mi altında mı?
+            if 'senkou_span_a' in latest and 'senkou_span_b' in latest:
+                cloud_top = max(latest['senkou_span_a'], latest['senkou_span_b'])
+                cloud_bottom = min(latest['senkou_span_a'], latest['senkou_span_b'])
+                
+                if current_price > cloud_top:
+                    signal = "Price above Ichimoku cloud"
+                    buy_signals.append(signal)
+                    signal_weights['buy'] += 1
+                elif current_price < cloud_bottom:
+                    signal = "Price below Ichimoku cloud"
+                    sell_signals.append(signal)
+                    signal_weights['sell'] += 1
+        
+        # Hacim analizi - OBV (On Balance Volume)
+        if 'obv' in latest and 'obv' in prev:
+            # Fiyat yükseliyor ama OBV düşüyorsa - fiyat hareketiyle uyumsuzluk (divergence)
+            if current_price > prev['close'] and latest['obv'] < prev['obv']:
+                signal = "Bearish volume divergence"
+                sell_signals.append(signal)
+                signal_weights['sell'] += 1.5
+            # Fiyat düşüyor ama OBV yükseliyorsa - potansiyel yükseliş
+            elif current_price < prev['close'] and latest['obv'] > prev['obv']:
+                signal = "Bullish volume divergence"
+                buy_signals.append(signal)
+                signal_weights['buy'] += 1.5
+                
+        # Volatilite ayarlamaları - ATR kullanarak
+        if 'atr' in latest:
+            volatility = latest['atr'] / current_price  # Normalize ATR
+            if volatility > self.vix_threshold:
+                signal = f"High volatility detected ({volatility:.4f})"
+                logger.info(signal)
+                # Yüksek volatilitede pozisyon boyutunu azalt
+                if self.adaptive_parameters:
+                    self.risk_per_trade = max(0.01, self.risk_per_trade * 0.8)  # Risk azaltma
+                    signal_weights['buy'] *= 0.8  # Volatilitede alım sinyallerini zayıflat
+            else:
+                # Normal volatilitede standart risk
+                if self.adaptive_parameters:
+                    self.risk_per_trade = min(0.03, self.risk_per_trade * 1.1)  # Risk artırma
+        
         logger.info(f"Current price: ${current_price:.2f}, RSI: {rsi:.2f}")
-        logger.info(f"Buy signals: {buy_signals}")
-        logger.info(f"Sell signals: {sell_signals}")
+        logger.info(f"Buy signals: {buy_signals} (weight: {signal_weights['buy']:.1f})")
+        logger.info(f"Sell signals: {sell_signals} (weight: {signal_weights['sell']:.1f})")
         
         return {
             'current_price': current_price,
             'buy_signals': buy_signals,
-            'sell_signals': sell_signals
+            'sell_signals': sell_signals,
+            'signal_weights': signal_weights,
+            'volatility': volatility if 'volatility' in locals() else None,
+            'rsi': rsi
         }
         
     def execute_buy(self, amount_usdt=None):
         """Execute a buy order (simulation)"""
         signals = self.get_trading_signals()
-        if not signals or not signals['buy_signals']:
-            logger.info("No buy signals detected")
+        if not signals:
+            logger.info("No trading signals detected")
+            return False
+            
+        # Ağırlıklı karar sistemi - sinyal ağırlıklarına göre alım kararı
+        buy_weight = signals['signal_weights']['buy']
+        sell_weight = signals['signal_weights']['sell']
+        
+        # Alım için minimum ağırlık eşiği ve satış ağırlığından fazla olmalı
+        if buy_weight < 3 or buy_weight <= sell_weight:
+            logger.info(f"Buy weight ({buy_weight:.1f}) not strong enough vs sell weight ({sell_weight:.1f})")
+            return False
+                
+        # Açık pozisyon sayısı kontrolü
+        if self.current_positions >= self.max_open_positions:
+            logger.info(f"Maximum open positions ({self.max_open_positions}) reached, skipping buy")
             return False
                 
         # Get current balance
         usdt_balance = self.demo_balance['USDT']
         
+        # Risk bazlı pozisyon boyutlandırma
         if amount_usdt is None:
-            amount_usdt = usdt_balance * 0.9  # Use 90% of available USDT
-        if amount_usdt > usdt_balance:
-            amount_usdt = usdt_balance
+            # Toplam portföy değeri hesaplama
+            portfolio_value = usdt_balance
+            wif_value = 0
+            
+            if signals['current_price'] and self.demo_balance['WIF'] > 0:
+                wif_value = self.demo_balance['WIF'] * signals['current_price']
+                portfolio_value += wif_value
+            
+            # Volatiliteye bağlı risk ayarı
+            risk_factor = self.risk_per_trade
+            if 'volatility' in signals and signals['volatility'] is not None:
+                if signals['volatility'] > self.vix_threshold:
+                    risk_factor = risk_factor * 0.7  # Yüksek volatilitede riski azalt
+            
+            # Risk bazlı işlem miktarı hesaplama
+            amount_usdt = portfolio_value * risk_factor
+            
+            # Alım gücü arttıkça pozisyon büyütme (trend takibi)
+            if buy_weight > 6:
+                amount_usdt *= 1.5  # Güçlü sinyaller için daha büyük pozisyon
+            elif buy_weight > 4:
+                amount_usdt *= 1.2  # Orta güçlü sinyaller için biraz daha büyük pozisyon
+            
+            # Maksimum işlem miktarı sınırlaması
+            max_amount = usdt_balance * self.max_position_size
+            amount_usdt = min(amount_usdt, max_amount)
+        
+            if amount_usdt > usdt_balance:
+                amount_usdt = usdt_balance
+                
+        # Minimum işlem miktarı kontrolü (çok küçük işlemler için komisyon oranı yüksek olur)
+        if amount_usdt < 10:
+            logger.info("Amount too small for trade, skipping")
+            return False
                 
         price = signals['current_price']
         wif_amount = amount_usdt / price
@@ -425,8 +690,9 @@ class WIFTraderBot:
         # Update balances
         self.demo_balance['USDT'] -= amount_usdt
         self.demo_balance['WIF'] += wif_amount
+        self.current_positions += 1
         
-        logger.info(f"Simulation: BUY {wif_amount:.2f} WIF at ${price:.4f}")
+        logger.info(f"Simulation: BUY {wif_amount:.2f} WIF at ${price:.4f} (signal weight: {buy_weight:.1f})")
                 
         # Record trade
         trade = {
@@ -435,7 +701,9 @@ class WIFTraderBot:
             'price': price,
             'amount': wif_amount,
             'value': amount_usdt,
-            'signals': signals['buy_signals']
+            'signals': signals['buy_signals'],
+            'signal_weight': buy_weight,
+            'strategy': 'weighted_decision' if buy_weight > 0 else 'standard'
         }
         self.trade_history.append(trade)
         self.last_operation = 'buy'
@@ -444,27 +712,55 @@ class WIFTraderBot:
     def execute_sell(self, wif_amount=None):
         """Execute a sell order (simulation)"""
         signals = self.get_trading_signals()
-        if not signals or not signals['sell_signals']:
-            logger.info("No sell signals detected")
+        if not signals:
+            logger.info("No trading signals detected")
             return False
             
+        # Ağırlıklı karar sistemi - sinyal ağırlıklarına göre satım kararı
+        buy_weight = signals['signal_weights']['buy']
+        sell_weight = signals['signal_weights']['sell']
+        
+        # Satış için minimum ağırlık eşiği ve alım ağırlığından fazla olmalı
+        if sell_weight < 3 or sell_weight <= buy_weight:
+            logger.info(f"Sell weight ({sell_weight:.1f}) not strong enough vs buy weight ({buy_weight:.1f})")
+            return False
+        
         # Get current balance
         wif_balance = self.demo_balance['WIF']
+        
+        if wif_balance <= 0:
+            logger.info("No WIF balance to sell")
+            return False
             
         if wif_amount is None:
-            wif_amount = wif_balance  # Sell all available WIF
+            # Tam satış veya kısmi satış kararı (trend güçlülüğüne göre)
+            if sell_weight > 6:
+                wif_amount = wif_balance  # Güçlü satış sinyalleri varsa tümünü sat
+            elif sell_weight > 4:
+                wif_amount = wif_balance * 0.75  # Orta düzey satış sinyalleri için %75'ini sat
+        else:
+                wif_amount = wif_balance * 0.5  # Zayıf satış sinyalleri için %50'sini sat
+        
         if wif_amount > wif_balance:
             wif_amount = wif_balance
+        
+        # Minimum işlem miktarı kontrolü
+        if wif_amount * signals['current_price'] < 10:
+            logger.info("Amount too small for trade, skipping")
+            return False
                 
-            price = signals['current_price']
+        price = signals['current_price']
         usdt_value = wif_amount * price
             
         # Update balances
         self.demo_balance['USDT'] += usdt_value
         self.demo_balance['WIF'] -= wif_amount
         
-        logger.info(f"Simulation: SELL {wif_amount:.2f} WIF at ${price:.4f}")
+        if wif_amount >= wif_balance * 0.9:  # Eğer pozisyonun çoğunu kapatıyorsak
+            self.current_positions -= 1
         
+        logger.info(f"Simulation: SELL {wif_amount:.2f} WIF at ${price:.4f} (signal weight: {sell_weight:.1f})")
+                
         # Record trade
         trade = {
             'timestamp': datetime.now(),
@@ -472,7 +768,9 @@ class WIFTraderBot:
             'price': price,
             'amount': wif_amount,
             'value': usdt_value,
-            'signals': signals['sell_signals']
+            'signals': signals['sell_signals'],
+            'signal_weight': sell_weight,
+            'strategy': 'weighted_decision' if sell_weight > 0 else 'standard'
         }
         self.trade_history.append(trade)
         self.last_operation = 'sell'
@@ -546,24 +844,43 @@ class WIFTraderBot:
     def calculate_portfolio_value(self):
         """Calculate current portfolio value"""
         signals = self.get_trading_signals()
+        current_price = None # Initialize current_price
         if signals:
-            current_price = signals['current_price']
+            current_price = signals.get('current_price') # Use .get() for safety
+
+        # If signals or price is unavailable, try fetching ticker directly
+        if current_price is None:
+             try:
+                 ticker = self.exchange.fetch_ticker(self.symbol)
+                 current_price = ticker['last']
+                 logger.info("Used ticker for current price in portfolio calculation.")
+             except Exception as ticker_err:
+                 logger.warning(f"Could not get current price for portfolio calculation: {ticker_err}")
+                 # Use the last known price if available, otherwise cannot calculate accurately
+                 if self.price_data is not None and not self.price_data.empty:
+                     current_price = self.price_data['close'].iloc[-1]
+                 else:
+                     logger.error("Cannot calculate portfolio value without current price.")
+                     return self.portfolio_value # Return last known value or initial
+
+        if current_price is None: # Still no price? Exit
+             logger.error("Failed to obtain current price. Cannot calculate portfolio value.")
+             return self.portfolio_value
+
         usdt_balance = self.demo_balance['USDT']
         wif_balance = self.demo_balance['WIF']
-                    
+
         wif_value = wif_balance * current_price
         total_value = usdt_balance + wif_value
-            
+
         # Calculate profit/loss percentage
         profit_loss = ((total_value - self.initial_portfolio_value) / self.initial_portfolio_value) * 100
-                    
+
         logger.info(f"Portfolio: {wif_balance:.2f} WIF (${wif_value:.2f}) + ${usdt_balance:.2f} USDT = ${total_value:.2f}")
         logger.info(f"Profit/Loss: {profit_loss:.2f}%")
-            
+
         self.portfolio_value = total_value
         return total_value
-                
-        return 0
     
     def plot_performance(self):
         """Plot trading performance and indicators"""
@@ -753,28 +1070,35 @@ class WIFTraderBot:
                         else:
                             logger.info(f"Decision is to {decision.upper()}, holding position")
                     else:
-                        logger.warning("No enhanced signals available")
-            
+                        logger.warning("No enhanced signals available this iteration.")
+                # else: Stop loss or take profit was triggered, already sold.
+
             # Calculate portfolio value
             self.calculate_portfolio_value()
-            
+
             # Update performance chart
             self.plot_performance()
-            
+
             # Check if it's time to send an email update
             self.check_email_notification()
-            
+
             logger.info("Trading iteration completed")
+
         except Exception as e:
-            logger.error(f"Error in trading iteration: {e}")
+            logger.error(f"Error in trading iteration: {e}", exc_info=True) # Log traceback
             # Generate synthetic data if we had an error (likely with data fetch)
-            if self.price_data is None:
-                logger.info("Generating synthetic data for testing purposes")
-                self.generate_synthetic_data()
-                self.calculate_indicators()
-                self.calculate_portfolio_value()
-                self.plot_performance()
-            logger.info("Trading iteration completed with fallback to synthetic data")
+            if self.price_data is None or self.price_data.empty:
+                logger.info("Attempting to use synthetic data after error.")
+                try:
+                    self.generate_synthetic_data()
+                    self.calculate_indicators()
+                    self.calculate_portfolio_value()
+                    self.plot_performance()
+                    logger.info("Trading iteration completed with fallback to synthetic data")
+                except Exception as synthetic_err:
+                     logger.error(f"Failed to generate/use synthetic data after error: {synthetic_err}")
+            else:
+                 logger.warning("Iteration failed, but existing price data might be usable next time.")
     
     def calculate_bollinger_bands(self, window=20, num_std=2):
         """Calculate Bollinger Bands"""
@@ -1673,29 +1997,45 @@ class WIFTraderBot:
             # Configure email server with TLS
             context = ssl.create_default_context()
             
-            # Try to send email via Gmail SMTP
+            # Use Mailjet SMTP for sending emails (simple and reliable)
             try:
-                server = smtplib.SMTP('smtp.gmail.com', 587)
+                server = smtplib.SMTP('in-v3.mailjet.com', 587)
+                server.ehlo()
                 server.starttls(context=context)
+                server.ehlo()
                 
-                # Note: For this to work, you would need to use an app password if using Gmail
-                # You can set this up in the .env file or directly here
-                email_password = os.getenv('EMAIL_PASSWORD', '')
-                email_user = os.getenv('EMAIL_USER', 'your-email@gmail.com')
+                # Mailjet credentials (register at mailjet.com for free tier)
+                mailjet_api_key = os.getenv('MAILJET_API_KEY', 'your_mailjet_api_key_here')
+                mailjet_api_secret = os.getenv('MAILJET_API_SECRET', 'your_mailjet_secret_key_here')
                 
-                if email_password:
-                    server.login(email_user, email_password)
+                # Gönderici adresi olarak kendi Gmail adresinizi kullanın (spam filtrelerini geçmek için)
+                # Bu adres doğrulanmış veya aynı domaine ait olmalı
+                sender_email = 'ahmetcacik363@gmail.com'  # .env dosyasında tanımlı e-posta adresi
+                sender_name = 'WIF Trader Bot'
+                msg['From'] = f"{sender_name} <{sender_email}>"
+                
+                # E-posta başlığını daha spesifik hale getir
+                msg['Subject'] = f'WIF Trader Bot - Portföy Güncelleme [{datetime.now().strftime("%H:%M:%S")}]'
+                
+                # Alıcı adresini kontrol et
+                if '@gmail.com' not in self.notification_email:
+                    logger.warning(f"Notification email does not look like a valid Gmail address: {self.notification_email}")
+                
+                try:
+                    server.login(mailjet_api_key, mailjet_api_secret)
                     server.send_message(msg)
+                    logger.info(f"Portfolio email sent to {self.notification_email} via Mailjet")
+                except Exception as mailjet_error:
+                    logger.error(f"Mailjet authentication failed: {mailjet_error}")
+                    # Log if email sending fails
+                    logger.warning(f"Email content (not sent): Portfolio value: ${total_value:.2f}, Profit/Loss: {profit_loss:.2f}%")
+                finally:
                     server.quit()
-                    logger.info(f"Portfolio email sent to {self.notification_email}")
-                else:
-                    # Fallback to logging if no password is set
-                    logger.warning("Email not sent: No email password provided in environment variables")
-                    logger.info("To enable email, add EMAIL_USER and EMAIL_PASSWORD to your .env file")
             except Exception as email_error:
-                logger.error(f"Failed to send email via Gmail: {email_error}")
-                # Try alternate method with a different provider if desired
-                
+                logger.error(f"Failed to send email: {email_error}")
+                # Logging if email sending fails completely
+                logger.warning(f"Email content (not sent): Portfolio value: ${total_value:.2f}, Profit/Loss: {profit_loss:.2f}%")
+            
             self.last_email_time = datetime.now()
             
         except Exception as e:
@@ -1742,7 +2082,7 @@ if __name__ == "__main__":
         print("- ADX for trend strength")
         print("- Stochastic RSI for overbought/oversold")
         print("- Weighted decision making system")
-        print("- Hourly portfolio email reports to yustun355@gmail.com")
+        print("- Hourly portfolio email reports to yustun355@hotmail.com")
         print("-" * 60)
         print("Settings:")
         print("- Timeframe: 5-minute candles")

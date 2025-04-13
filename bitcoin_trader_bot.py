@@ -1,7 +1,16 @@
 #!/usr/bin/env python
+# ====================================================================
+# WIF TRADER BOT - Gelişmiş Bitcoin ve WIF Coin Alım-Satım Botu
+# ====================================================================
+# Bu bot, gerçek piyasa verilerini kullanarak kripto para alım-satımı simüle eder.
+# Çoklu teknik göstergeler kullanarak (RSI, EMA, MACD) ve gelişmiş sinyal ağırlıklandırma 
+# sistemi ile işlem kararları verir. Stop-loss, take-profit ve trailing stop
+# özellikleri ile riski sınırlar ve kârı optimize eder.
+# ====================================================================
+
 import os
 import time
-import ccxt
+import ccxt  # Kripto borsalarından veri çekmek için
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -31,15 +40,28 @@ logging.basicConfig(
 logger = logging.getLogger("wif_trader")
 
 class WIFTraderBot:
+    """
+    WIF Trader Bot sınıfı, gerçek piyasa verilerini kullanarak WIF/USDT 
+    alım-satım stratejisini uygular. Çoklu teknik göstergeler, trend analizi
+    ve volatilite adaptasyonu ile akıllı işlem kararları verir.
+    
+    Önemli Özellikler:
+    - Gelişmiş sinyal ağırlıklandırma sistemi
+    - Dinamik pozisyon boyutlandırma
+    - Volatiliteye uyum sağlayan adaptif stratejiler
+    - Trailing stop ve akıllı kâr alma stratejileri
+    - Destek/direnç analizi ile güçlü alım/satım noktaları belirleme
+    - Düzenli e-posta bildirimleri ile durum takibi
+    """
     def __init__(self, exchange_id='binance', symbol='WIF/USDT', timeframe='5m', initial_balance=1000):
         """
-        Initialize the WIF trading bot
+        WIF trading bot'un başlatılması ve temel ayarların yapılması
         
         Parameters:
-        - exchange_id: The exchange to use for data (default: 'binance')
-        - symbol: The trading pair (default: 'WIF/USDT')
-        - timeframe: The timeframe for analysis (default: '5m')
-        - initial_balance: Initial USDT balance for simulation (default: 1000)
+        - exchange_id: Veri çekilecek borsa (default: 'binance')
+        - symbol: İşlem çifti (default: 'WIF/USDT')
+        - timeframe: Analiz için zaman dilimi (default: '5m')
+        - initial_balance: Başlangıç USDT bakiyesi (default: 1000)
         """
         self.exchange_id = exchange_id
         self.symbol = symbol
@@ -70,7 +92,7 @@ class WIFTraderBot:
             'USDT': initial_balance,
             'WIF': 0.0
         }
-        
+            
         # Bot state and configuration
         self.price_data = None
         self.last_operation = None
@@ -104,7 +126,17 @@ class WIFTraderBot:
         return {'USDT': {'free': self.demo_balance['USDT']}, 'WIF': {'free': self.demo_balance['WIF']}}
             
     def fetch_market_data(self, limit=100):
-        """Fetch market data from CCXT"""
+        """
+        CCXT kütüphanesini kullanarak borsadan piyasa verilerini çeker
+        
+        İşleyiş:
+        1. Öncelikle Binance veya seçilen borsadan veri çekmeyi dener
+        2. Başarısız olursa yedek olarak başka bir borsayı dener
+        3. O da başarısız olursa CoinGecko API'den veri çeker
+        4. Tüm kaynaklar başarısız olursa, tutarlı test için sentetik veri üretir
+        
+        Bu yaklaşım, botun her durumda çalışmaya devam etmesini sağlar
+        """
         try:
             logger.info(f"Fetching real market data from {self.exchange_id}")
             
@@ -144,30 +176,28 @@ class WIFTraderBot:
             logger.error(f"Error fetching from {self.exchange_id}: {e}")
             # Try a different exchange if the first one fails
             fallback_exchange = 'kucoin'
-            if self.exchange_id != fallback_exchange:
-                logger.info(f"Trying fallback exchange: {fallback_exchange}")
-                try:
+            
+            try:
+                if self.exchange_id != fallback_exchange:
+                    logger.info(f"Trying fallback exchange: {fallback_exchange}")
                     exchange_class = getattr(ccxt, fallback_exchange)
                     fallback = exchange_class({'enableRateLimit': True})
                     if not fallback.has['fetchOHLCV']:
                         raise Exception(f"{fallback_exchange} does not support fetchOHLCV")
-                        
+                    
                     fallback.load_markets()
                     ohlcv = fallback.fetch_ohlcv(self.symbol, self.timeframe, None, limit)
-                    
+                
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                     df.set_index('timestamp', inplace=True)
-                    
+                
                     logger.info(f"Market data fetched successfully from {fallback_exchange}: {len(df)} candles")
                     self.price_data = df
                     return df
-                except Exception as fallback_error:
-                    logger.error(f"Error with fallback exchange: {fallback_error}")
-            
-            # If all exchanges fail, try fetching from CoinGecko
-            logger.info("Trying CoinGecko API")
-            try:
+                
+                # If fallback exchange is not available or we're already using it, try CoinGecko
+                logger.info("Trying CoinGecko API")
                 url = "https://api.coingecko.com/api/v3/coins/dogwifhat/market_chart"
                 
                 # Convert timeframe to days for CoinGecko
@@ -214,13 +244,12 @@ class WIFTraderBot:
                 logger.info(f"Market data fetched successfully from CoinGecko: {len(df)} candles")
                 self.price_data = df
                 return df
-            except Exception as coingecko_error:
-                logger.error(f"Error fetching from CoinGecko: {coingecko_error}")
-            
-            # All attempts failed, generate synthetic data as last resort
-            logger.warning("All data sources failed. Using synthetic data as last resort.")
-            self.generate_synthetic_data(limit)
-            return self.price_data
+            except Exception as data_error:
+                logger.error(f"Error fetching data from alternative sources: {data_error}")
+                # All attempts failed, generate synthetic data as last resort
+                logger.warning("All data sources failed. Using synthetic data as last resort.")
+                self.generate_synthetic_data(limit)
+                return self.price_data
             
         except Exception as e:
             logger.error(f"Error fetching market data from all sources: {e}")
@@ -381,7 +410,7 @@ class WIFTraderBot:
         if not signals or not signals['buy_signals']:
             logger.info("No buy signals detected")
             return False
-            
+                
         # Get current balance
         usdt_balance = self.demo_balance['USDT']
         
@@ -389,7 +418,7 @@ class WIFTraderBot:
             amount_usdt = usdt_balance * 0.9  # Use 90% of available USDT
         if amount_usdt > usdt_balance:
             amount_usdt = usdt_balance
-            
+                
         price = signals['current_price']
         wif_amount = amount_usdt / price
         
@@ -411,7 +440,7 @@ class WIFTraderBot:
         self.trade_history.append(trade)
         self.last_operation = 'buy'
         return True
-    
+                
     def execute_sell(self, wif_amount=None):
         """Execute a sell order (simulation)"""
         signals = self.get_trading_signals()
@@ -427,7 +456,7 @@ class WIFTraderBot:
         if wif_amount > wif_balance:
             wif_amount = wif_balance
                 
-        price = signals['current_price']
+            price = signals['current_price']
         usdt_value = wif_amount * price
             
         # Update balances
@@ -435,7 +464,7 @@ class WIFTraderBot:
         self.demo_balance['WIF'] -= wif_amount
         
         logger.info(f"Simulation: SELL {wif_amount:.2f} WIF at ${price:.4f}")
-                
+        
         # Record trade
         trade = {
             'timestamp': datetime.now(),
@@ -475,7 +504,7 @@ class WIFTraderBot:
             logger.info(f"Stop loss triggered: {price_change:.2%} loss")
             self.execute_sell()
             return True
-        
+            
         # Trailing stop loss
         if self.trailing_stop_enabled and price_change > self.trailing_stop_activation:
             # Calculate highest price since buy
@@ -519,20 +548,20 @@ class WIFTraderBot:
         signals = self.get_trading_signals()
         if signals:
             current_price = signals['current_price']
-            usdt_balance = self.demo_balance['USDT']
-            wif_balance = self.demo_balance['WIF']
+        usdt_balance = self.demo_balance['USDT']
+        wif_balance = self.demo_balance['WIF']
                     
-            wif_value = wif_balance * current_price
-            total_value = usdt_balance + wif_value
+        wif_value = wif_balance * current_price
+        total_value = usdt_balance + wif_value
             
-            # Calculate profit/loss percentage
-            profit_loss = ((total_value - self.initial_portfolio_value) / self.initial_portfolio_value) * 100
+        # Calculate profit/loss percentage
+        profit_loss = ((total_value - self.initial_portfolio_value) / self.initial_portfolio_value) * 100
                     
-            logger.info(f"Portfolio: {wif_balance:.2f} WIF (${wif_value:.2f}) + ${usdt_balance:.2f} USDT = ${total_value:.2f}")
-            logger.info(f"Profit/Loss: {profit_loss:.2f}%")
+        logger.info(f"Portfolio: {wif_balance:.2f} WIF (${wif_value:.2f}) + ${usdt_balance:.2f} USDT = ${total_value:.2f}")
+        logger.info(f"Profit/Loss: {profit_loss:.2f}%")
             
-            self.portfolio_value = total_value
-            return total_value
+        self.portfolio_value = total_value
+        return total_value
                 
         return 0
     
@@ -645,7 +674,22 @@ class WIFTraderBot:
             plt.close()
     
     def run_single_iteration(self):
-        """Run a single iteration of the trading bot"""
+        """
+        Ticaret botunun tek bir döngüsünü çalıştırır
+        
+        İşleyiş:
+        1. Piyasa verilerini çeker ve indikatörleri hesaplar
+        2. Volatiliteye göre strateji ayarlamaları yapar
+        3. Stop-loss ve take-profit durumlarını kontrol eder
+        4. Tüm sinyalleri toplayıp ağırlıklı karar verir
+        5. Piyasa trendini dikkate alarak kararı filtreler
+        6. Gerekli alım/satım işlemlerini gerçekleştirir
+        7. Portföy değerini hesaplayıp performans grafiğini günceller
+        8. E-posta bildirim zamanı geldiyse rapor gönderir
+        
+        Her iterasyon bağımsız çalışır, böylece sürekli piyasa değişimlerine
+        adapte olur ve yeni fırsatları/riskleri değerlendirir
+        """
         logger.info("Starting trading iteration")
         
         try:
@@ -1100,7 +1144,18 @@ class WIFTraderBot:
         return enhanced_signals
         
     def identify_market_trend(self):
-        """Identify the overall market trend"""
+        """
+        Genel piyasa trendini belirleyen fonksiyon
+        
+        İşleyiş:
+        1. EMA'ları kontrol eder (kısa > uzun = yukarı trend)
+        2. Son mum hareketlerini analiz eder (ardışık yükselişler/düşüşler)
+        3. Fiyatın ortalamaya göre konumunu değerlendirir 
+        4. ADX göstergesi ile trend gücünü ölçer
+        5. Tüm faktörleri birleştirerek 'uptrend', 'downtrend' veya 'sideways' kararı verir
+        
+        Trend belirleme, trende karşı işlem yapma riskini azaltır
+        """
         if self.price_data is None:
             return 'unknown'
             
@@ -1141,7 +1196,22 @@ class WIFTraderBot:
             return 'sideways'
     
     def adjust_for_market_volatility(self):
-        """Piyasa volatilitesine göre strateji ayarlamaları yap"""
+        """
+        Piyasa volatilitesine göre stratejiyi dinamik olarak ayarlar
+        
+        İşleyiş:
+        1. Bollinger bant genişliği ile volatiliteyi ölçer
+        2. ATR göstergesi ile fiyat hareketliliğini hesaplar
+        3. Yüksek volatilitede:
+           - Daha sıkı stop-loss (%2.5)
+           - Daha küçük pozisyon boyutu (max %60)
+        4. Düşük volatilitede:
+           - Daha geniş stop-loss (%4)
+           - Daha büyük pozisyon boyutu (max %80)
+        
+        Volatiliteye adaptasyon, farklı piyasa koşullarında riskin 
+        daha iyi yönetilmesini sağlar
+        """
         if self.price_data is None:
             return
         
@@ -1191,7 +1261,18 @@ class WIFTraderBot:
         }
         
     def evaluate_signals_with_weights(self, signals):
-        """Evaluate signals with different weights to make a trading decision"""
+        """
+        Farklı teknik göstergelere ağırlık vererek alım/satım kararı verir
+        
+        İşleyiş:
+        1. Her göstergeye farklı ağırlıklar atar (RSI: 2.5, Bollinger: 1.8 gibi)
+        2. Özel durumlarda ekstra ağırlık verir (örn. RSI aşırı satım durumunda 1.5x)
+        3. Buy/sell skorlarını hesaplar ve eşik değerlerle karşılaştırır
+        4. Daha seçici işlemler için yüksek eşik değerleri kullanır
+        5. Pozisyonda olma durumuna göre kâr alma eğilimini ayarlar
+        
+        Bu ağırlıklandırma sistemi, daha akıllı ve daha az hatalı kararlar verir
+        """
         if not signals:
             return None
         
@@ -1333,7 +1414,19 @@ class WIFTraderBot:
         return consensus
         
     def execute_buy_weighted(self, amount_usdt=None):
-        """Execute a buy order with enhanced signals and position sizing"""
+        """
+        Gelişmiş alım stratejisi uygulayan fonksiyon
+        
+        İşleyiş:
+        1. Ağırlıklı sinyal değerlendirmesi sonucu alım kararı verilmişse
+        2. Sinyal gücüne göre dinamik pozisyon boyutlandırma yapar
+        3. Güçlü sinyaller daha büyük pozisyon alımına neden olur
+        4. Yüksek volatilite durumunda pozisyon boyutunu otomatik azaltır
+        5. Maksimum pozisyon boyutunu sınırlar (ana bakiyenin %80'i gibi)
+        
+        Dinamik pozisyon boyutlandırma, güçlü fırsatlarda daha çok kazanç
+        sağlarken riski de dengeler
+        """
         enhanced_signals = self.get_enhanced_trading_signals()
         decision = self.evaluate_signals_with_weights(enhanced_signals)
         
@@ -1439,7 +1532,18 @@ class WIFTraderBot:
         return True
 
     def send_portfolio_email(self):
-        """Send portfolio performance report via email"""
+        """
+        Portföy performans raporunu e-posta olarak gönderir
+        
+        İşleyiş:
+        1. HTML formatında güzel bir e-posta şablonu oluşturur
+        2. Mevcut bakiye, toplam değer, kar/zarar bilgilerini ekler
+        3. Son işlemleri detaylı bir tablo halinde gösterir
+        4. Performans grafiğini ek olarak ekler
+        5. Gmail SMTP üzerinden belirlenen adrese gönderir
+        
+        Düzenli e-posta bildirimleri, uzaktan takibi kolaylaştırır
+        """
         try:
             # Create email content
             msg = MIMEMultipart()

@@ -314,67 +314,127 @@ class BitcoinTradingEnv(gym.Env):
         """
         reward = 0
         
-        # 1. Portföy değişimi ödülü (temel ödül)
-        reward += np.tanh(portfolio_change * 20)  # Temel getiri
+        # 1. Portföy değişimi ödülü (temel ödül - daha güçlü)
+        reward += np.tanh(portfolio_change * 30)  # Daha güçlü bir temel getiri sinyali
         
-        # 2. Trend takip etme ödülü
-        # Yükselen trend içinde alım yapmak veya düşen trend içinde satım yapmak ödüllendirilir
+        # 2. Trend takip etme ödülü (daha güçlü)
         trend_score = 0
-        if action == 2 and self.df.iloc[self.current_step]['trend'] > 0:  # Yükselen trendde AL
-            trend_score = 0.3
-        elif action == 0 and self.df.iloc[self.current_step]['trend'] < 0:  # Düşen trendde SAT
-            trend_score = 0.3
-        elif action == 1 and abs(self.df.iloc[self.current_step]['trend']) < 0.1:  # Yatay trendde TUT
-            trend_score = 0.1
-        reward += trend_score * self.df.iloc[self.current_step]['trend_strength']
+        current_trend = self.df.iloc[self.current_step]['trend']
+        current_trend_strength = self.df.iloc[self.current_step]['trend_strength']
         
-        # 3. RSI tabanlı ödül
+        if action == 2 and current_trend > 0:  # Yükselen trendde AL
+            trend_score = 0.5  # Trend takibi için daha yüksek ödül
+        elif action == 0 and current_trend < 0:  # Düşen trendde SAT
+            trend_score = 0.5
+        elif action == 1 and abs(current_trend) < 0.1:  # Yatay trendde TUT
+            trend_score = 0.2
+        else:  # Trende karşı hareket etmeye daha güçlü ceza
+            trend_score = -0.3 * abs(current_trend) * current_trend_strength
+            
+        reward += trend_score * current_trend_strength
+        
+        # 3. RSI tabanlı ödül (iyileştirilmiş)
         rsi = self.df.iloc[self.current_step]['rsi']
         if action == 2 and rsi < 0.3:  # Aşırı satış bölgesinde AL
-            reward += 0.2
+            reward += 0.4  # Daha güçlü RSI ödülü
         elif action == 0 and rsi > 0.7:  # Aşırı alım bölgesinde SAT
-            reward += 0.2
+            reward += 0.4
+        elif action == 2 and rsi > 0.7:  # Aşırı alım bölgesinde AL yapmaya ceza
+            reward -= 0.3
+        elif action == 0 and rsi < 0.3:  # Aşırı satış bölgesinde SAT yapmaya ceza
+            reward -= 0.3
         
-        # 4. Destek/Direnç tabanlı ödül
+        # 4. Destek/Direnç tabanlı ödül (iyileştirilmiş)
         sr_position = self.df.iloc[self.current_step]['sr_position']
         if action == 2 and sr_position < 0.2:  # Destek seviyelerine yakınken AL
-            reward += 0.2
+            reward += 0.4
         elif action == 0 and sr_position > 0.8:  # Direnç seviyelerine yakınken SAT
-            reward += 0.2
+            reward += 0.4
+        elif action == 2 and sr_position > 0.8:  # Direnç seviyelerinde AL yapmaya ceza
+            reward -= 0.3
+        elif action == 0 and sr_position < 0.2:  # Destek seviyelerinde SAT yapmaya ceza
+            reward -= 0.3
         
-        # 5. Aynı aksiyonu tekrarlama cezası
+        # 5. MACD sinyal takibi (yeni)
+        macd = self.df.iloc[self.current_step]['macd']
+        macd_signal = self.df.iloc[self.current_step]['macd_signal']
+        macd_cross_up = macd > macd_signal and (self.df.iloc[self.current_step-1]['macd'] if self.current_step > 0 else 0) <= (self.df.iloc[self.current_step-1]['macd_signal'] if self.current_step > 0 else 0)
+        macd_cross_down = macd < macd_signal and (self.df.iloc[self.current_step-1]['macd'] if self.current_step > 0 else 0) >= (self.df.iloc[self.current_step-1]['macd_signal'] if self.current_step > 0 else 0)
+        
+        if action == 2 and macd_cross_up:  # MACD yukarı kesişiminde AL
+            reward += 0.4
+        elif action == 0 and macd_cross_down:  # MACD aşağı kesişiminde SAT
+            reward += 0.4
+        
+        # 6. Hacim ödülü (yeni)
+        volume_change = self.df.iloc[self.current_step]['volume_change']
+        if abs(volume_change) > 0.2:  # Önemli hacim değişiminde
+            if action != 1:  # Al veya sat aksiyonlarında
+                reward *= (1 + min(abs(volume_change), 1) * 0.5)  # Hacim değişimi büyükse, ödülü artır (max 1.5x)
+        
+        # 7. Aynı aksiyonu tekrarlama cezası (daha ılımlı)
         if self.prev_action is not None and action == self.prev_action:
             self.consecutive_same_action += 1
-            if self.consecutive_same_action > 5:  # 5 adımdan fazla aynı aksiyon tekrarlanırsa
-                repeat_penalty = min(0.1 * (self.consecutive_same_action - 5), 0.5)  # Maksimum 0.5 ceza
+            if self.consecutive_same_action > 3:  # 3 adımdan fazla aynı aksiyon tekrarlanırsa
+                repeat_penalty = min(0.05 * (self.consecutive_same_action - 3), 0.3)  # Maksimum 0.3 ceza
                 reward -= repeat_penalty
         else:
             self.consecutive_same_action = 0
         
-        # 6. BTC uzun süre tutma cezası/ödülü (yükselen trendde ödül, düşen trendde ceza)
+        # 8. BTC uzun süre tutma cezası/ödülü (geliştirilmiş trend bazlı strateji)
         if self.btc_held > 0:
             self.holding_duration += 1
             trend = self.df.iloc[self.current_step]['trend']
-            if trend > 0 and self.holding_duration > 10:  # Yükselen trendde uzun süre tutma
-                hold_bonus = min(0.01 * (self.holding_duration - 10), 0.2)  # Maksimum 0.2 ödül
-                reward += hold_bonus
-            elif trend < 0 and self.holding_duration > 10:  # Düşen trendde uzun süre tutma
-                hold_penalty = min(0.01 * (self.holding_duration - 10), 0.3)  # Maksimum 0.3 ceza
+            if trend > 0:  # Yükselen trend
+                if self.holding_duration > 5:  # Trend devam ediyorsa tutmaya devam et
+                    hold_bonus = min(0.02 * (self.holding_duration - 5), 0.3)  # Maksimum 0.3 ödül
+                    reward += hold_bonus
+            elif trend < 0 and self.holding_duration > 3:  # Düşen trenddeyken tutuyorsa
+                hold_penalty = min(0.03 * (self.holding_duration - 3), 0.4)  # Daha hızlı ceza (maksimum 0.4)
                 reward -= hold_penalty
         else:
             self.holding_duration = 0
         
-        # 7. Yüksek volatilitede yapılan işlemlere ek ödül/ceza
+        # 9. Yüksek volatilitede yapılan işlemlere ek ödül/ceza (iyileştirilmiş)
         volatility = self.df.iloc[self.current_step]['volatility']
         if volatility > 0.03:  # Yüksek volatilite
-            if action != 1:  # Al veya sat
-                reward *= (1 + volatility * 5)  # Doğru tahmin ederse daha yüksek ödül
+            if action != 1:  # Al veya sat aksiyonlarında
+                reward *= (1 + volatility * 7)  # Doğru tahmin ederse daha yüksek ödül (7x faktör)
         
-        # 8. Portföy çeşitlendirme ödülü (ne çok fazla BTC ne de çok fazla USDT tutması ödüllendirilir)
+        # 10. Fiyat momentumu dikkate alma (yeni)
+        momentum_5 = self.df.iloc[self.current_step]['momentum_5']
+        momentum_10 = self.df.iloc[self.current_step]['momentum_10']
+        if action == 2 and momentum_5 > 0 and momentum_10 > 0:  # Çift momentum yukarı ve AL
+            reward += 0.3
+        elif action == 0 and momentum_5 < 0 and momentum_10 < 0:  # Çift momentum aşağı ve SAT
+            reward += 0.3
+        
+        # 11. Portföy çeşitlendirme ve risk yönetimi (geliştirilmiş)
         portfolio_balance = self.btc_held * self.current_price / self.portfolio_value if self.portfolio_value > 0 else 0
-        # 0.4-0.6 arası ideal çeşitlendirme sayılır
-        if 0.4 <= portfolio_balance <= 0.6:
-            reward += 0.1
+        if current_trend > 0:  # Yükselen trend
+            # Yükselen trenddeyken daha fazla kripto tut (0.5-0.7 arası ideal)
+            if 0.5 <= portfolio_balance <= 0.7:
+                reward += 0.2
+            elif portfolio_balance < 0.3 and action != 2:  # Yükselen trendde az kripto tutuyorsa ve AL yapmıyorsa
+                reward -= 0.2
+        else:  # Düşen veya yatay trend
+            # Düşen trenddeyken daha az kripto tut (0.2-0.4 arası ideal)
+            if 0.2 <= portfolio_balance <= 0.4:
+                reward += 0.2
+            elif portfolio_balance > 0.6 and action != 0:  # Düşen trendde fazla kripto tutuyorsa ve SAT yapmıyorsa
+                reward -= 0.2
+        
+        # 12. Destek direnç kırılması (yeni)
+        close_price = self.df.iloc[self.current_step]['close']
+        resistance = self.df.iloc[self.current_step]['resistance']
+        support = self.df.iloc[self.current_step]['support']
+        
+        # Direnç kırılması
+        if close_price > resistance * 1.01 and action == 2:  # %1 direnç kırılması ve AL
+            reward += 0.5
+        # Destek kırılması
+        elif close_price < support * 0.99 and action == 0:  # %1 destek kırılması ve SAT
+            reward += 0.5
         
         # Ödülü normalize et
         reward = np.clip(reward, -1, 1)
@@ -995,25 +1055,29 @@ class BitcoinTraderAI:
                 accuracy_threshold=accuracy_threshold
             )
             
-            # PPO modelini oluştur ve eğit (geliştirilmiş parametrelerle)
+            # PPO modelini oluştur ve eğit (en iyi finansal performans için optimize edilmiş parametreler)
             self.model = PPO(
                 "MlpPolicy",
                 self.train_env,
                 verbose=1,
-                learning_rate=0.0003,     # Öğrenme oranı
-                n_steps=2048,            # Adım sayısı
-                batch_size=128,          # Daha büyük batch size
-                gamma=0.99,              # İndirim faktörü
-                ent_coef=0.005,          # Entropy katsayısı (daha fazla keşif)
-                vf_coef=0.5,             # Value function katsayısı
-                max_grad_norm=0.5,       # Gradient clipping
-                gae_lambda=0.95,         # GAE lambda parametresi
-                clip_range=0.2,          # PPO clipping parametresi
+                learning_rate=0.0002,     # Daha düşük öğrenme oranı - daha kararlı
+                n_steps=2048,            # Her güncellemeden önce toplanan adım sayısı
+                batch_size=256,          # Daha büyük batch size - daha iyi genelleme
+                gamma=0.995,             # Daha yüksek gamma - uzun vadeli getiri
+                ent_coef=0.01,           # Daha yüksek entropy - daha fazla keşif
+                vf_coef=0.7,             # Değer fonksiyonu katsayısını artır
+                max_grad_norm=0.7,       # Daha esnek gradient clipping
+                gae_lambda=0.98,         # Yüksek lambda - daha iyi avantaj tahmini
+                clip_range=0.25,         # Daha geniş clip aralığı
+                n_epochs=10,             # Her batch için daha fazla eğitim epoch
+                target_kl=0.015,         # KL ıraksaması için hedef değer
                 policy_kwargs={
                     'net_arch': [
-                        {'pi': [128, 128], 'vf': [128, 128]}  # Daha derin ağ mimarisi
+                        {'pi': [256, 128, 64], 'vf': [256, 128, 64]}  # Daha derin ve geniş ağ mimarisi
                     ],
-                    'activation_fn': torch.nn.ReLU  # ReLU aktivasyon fonksiyonu
+                    'activation_fn': torch.nn.ReLU,  # ReLU aktivasyon fonksiyonu
+                    'log_std_init': -2.0,  # Başlangıçta daha düşük rastgelelik
+                    'ortho_init': True     # Daha iyi ağırlık başlatma
                 }
             )
             
